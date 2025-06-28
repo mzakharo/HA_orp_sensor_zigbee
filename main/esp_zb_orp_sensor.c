@@ -49,20 +49,21 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
             ESP_LOGI(TAG, "Received ZCL attribute write: endpoint(0x%x), cluster(0x%x), attribute(0x%x), data size(%d)",
                      set_attr_message->info.dst_endpoint, set_attr_message->info.cluster, set_attr_message->attribute.id, set_attr_message->attribute.data.size);
 
-            /* Handle custom ORP calibration attribute */
+            /* Handle ORP calibration attribute in Analog Input cluster */
             if (set_attr_message->info.dst_endpoint == HA_ESP_SENSOR_ENDPOINT &&
-                set_attr_message->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_BASIC &&
-                set_attr_message->attribute.id == ESP_ZB_ZCL_ATTR_CUSTOM_ORP_CALIBRATION_ID) {
+                set_attr_message->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT &&
+                set_attr_message->attribute.id == ESP_ZB_ZCL_ATTR_ORP_CALIBRATION_ID) {
                 
-                if (set_attr_message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_S16) {
-                    int16_t calibration_offset = *(int16_t*)set_attr_message->attribute.data.value;
+                if (set_attr_message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_SINGLE) {
+                    float calibration_offset_f = *(float*)set_attr_message->attribute.data.value;
+                    int calibration_offset = (int)calibration_offset_f;
                     
                     /* Validate calibration range */
                     if (calibration_offset >= ESP_ORP_CALIBRATION_MIN_VALUE && 
                         calibration_offset <= ESP_ORP_CALIBRATION_MAX_VALUE) {
                         
                         /* Apply calibration to ORP sensor */
-                        ret = orp_sensor_set_calibration((int)calibration_offset);
+                        ret = orp_sensor_set_calibration(calibration_offset);
                         if (ret == ESP_OK) {
                             ESP_LOGI(TAG, "ORP calibration set to: %d mV", calibration_offset);
                         } else {
@@ -221,16 +222,19 @@ static esp_zb_cluster_list_t *custom_orp_sensor_clusters_create(esp_zb_analog_in
     ESP_ERROR_CHECK(esp_zb_basic_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, MANUFACTURER_NAME));
     ESP_ERROR_CHECK(esp_zb_basic_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, MODEL_IDENTIFIER));
     
-    /* Add custom calibration attribute manually to basic cluster */
-    int16_t calibration_default = 0;  /* Default calibration offset */
-    ESP_ERROR_CHECK(esp_zb_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_CLUSTER_ID_BASIC, 
-        ESP_ZB_ZCL_ATTR_CUSTOM_ORP_CALIBRATION_ID, ESP_ZB_ZCL_ATTR_TYPE_S16, 
+    /* Create analog input cluster and add calibration attribute */
+    esp_zb_attribute_list_t *analog_input_cluster = esp_zb_analog_input_cluster_create(analog_input_cfg);
+    
+    /* Add calibration attribute to analog input cluster using maxPresentValue */
+    float calibration_default = 0.0f;  /* Default calibration offset */
+    ESP_ERROR_CHECK(esp_zb_cluster_add_attr(analog_input_cluster, ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT, 
+        ESP_ZB_ZCL_ATTR_ORP_CALIBRATION_ID, ESP_ZB_ZCL_ATTR_TYPE_SINGLE, 
         ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &calibration_default));
     
     ESP_ERROR_CHECK(esp_zb_cluster_list_add_basic_cluster(cluster_list, basic_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
     ESP_ERROR_CHECK(esp_zb_cluster_list_add_identify_cluster(cluster_list, esp_zb_identify_cluster_create(NULL), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
     ESP_ERROR_CHECK(esp_zb_cluster_list_add_identify_cluster(cluster_list, esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_IDENTIFY), ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE));
-    ESP_ERROR_CHECK(esp_zb_cluster_list_add_analog_input_cluster(cluster_list, esp_zb_analog_input_cluster_create(analog_input_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
+    ESP_ERROR_CHECK(esp_zb_cluster_list_add_analog_input_cluster(cluster_list, analog_input_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
     return cluster_list;
 }
 
@@ -269,10 +273,10 @@ static void esp_zb_task(void *pvParameters)
     /* Initialize calibration attribute with current value from NVS */
     int current_calibration = 0;
     if (orp_sensor_get_calibration(&current_calibration) == ESP_OK) {
-        int16_t calibration_value = (int16_t)current_calibration;
+        float calibration_value = (float)current_calibration;
         esp_zb_zcl_set_attribute_val(HA_ESP_SENSOR_ENDPOINT,
-            ESP_ZB_ZCL_CLUSTER_ID_BASIC, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-            ESP_ZB_ZCL_ATTR_CUSTOM_ORP_CALIBRATION_ID, &calibration_value, false);
+            ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+            ESP_ZB_ZCL_ATTR_ORP_CALIBRATION_ID, &calibration_value, false);
         ESP_LOGI(TAG, "Initialized calibration attribute with current value: %d mV", current_calibration);
     }
 

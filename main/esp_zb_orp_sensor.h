@@ -25,8 +25,8 @@
 #define ESP_ORP_SENSOR_MIN_VALUE        (100)   /* Local sensor min measured value (millivolts) */
 #define ESP_ORP_SENSOR_MAX_VALUE        (1000)  /* Local sensor max measured value (millivolts) */
 
-/* Custom attribute for ORP calibration offset */
-#define ESP_ZB_ZCL_ATTR_CUSTOM_ORP_CALIBRATION_ID    0xF000  /* Custom attribute ID for calibration */
+/* ORP calibration using maxPresentValue attribute in Analog Input cluster */
+#define ESP_ZB_ZCL_ATTR_ORP_CALIBRATION_ID    ESP_ZB_ZCL_ATTR_ANALOG_INPUT_MAX_PRESENT_VALUE_ID  /* Use maxPresentValue for calibration */
 #define ESP_ORP_CALIBRATION_MIN_VALUE   (-500)  /* Minimum calibration offset (millivolts) */
 #define ESP_ORP_CALIBRATION_MAX_VALUE   (500)   /* Maximum calibration offset (millivolts) */
 

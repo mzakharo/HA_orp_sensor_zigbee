@@ -22,8 +22,8 @@ export default {
         }),
         m.numeric({
             name: "orp_calibration",
-            cluster: "genBasic",
-            attribute: 0xF000,
+            cluster: "genAnalogInput",
+            attribute: "maxPresentValue",
             description: "ORP calibration offset",
             unit: "mV",
             precision: 1,
