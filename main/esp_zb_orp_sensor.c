@@ -33,6 +33,46 @@ static switch_func_pair_t button_func_pair[] = {
     {GPIO_INPUT_IO_TOGGLE_SWITCH, SWITCH_ONOFF_TOGGLE_CONTROL}
 };
 
+/* Helper function to convert ZCL status code to string */
+static const char* esp_zb_zcl_status_to_string(uint8_t status_code)
+{
+    switch (status_code) {
+        case ESP_ZB_ZCL_STATUS_SUCCESS: return "SUCCESS";
+        case ESP_ZB_ZCL_STATUS_FAIL: return "FAIL";
+        case ESP_ZB_ZCL_STATUS_NOT_AUTHORIZED: return "NOT_AUTHORIZED";
+        case ESP_ZB_ZCL_STATUS_MALFORMED_CMD: return "MALFORMED_CMD";
+        case ESP_ZB_ZCL_STATUS_UNSUP_CLUST_CMD: return "UNSUP_CLUST_CMD";
+        case ESP_ZB_ZCL_STATUS_UNSUP_GEN_CMD: return "UNSUP_GEN_CMD";
+        case ESP_ZB_ZCL_STATUS_UNSUP_MANUF_CLUST_CMD: return "UNSUP_MANUF_CLUST_CMD";
+        case ESP_ZB_ZCL_STATUS_UNSUP_MANUF_GEN_CMD: return "UNSUP_MANUF_GEN_CMD";
+        case ESP_ZB_ZCL_STATUS_INVALID_FIELD: return "INVALID_FIELD";
+        case ESP_ZB_ZCL_STATUS_UNSUP_ATTRIB: return "UNSUP_ATTRIB";
+        case ESP_ZB_ZCL_STATUS_INVALID_VALUE: return "INVALID_VALUE";
+        case ESP_ZB_ZCL_STATUS_READ_ONLY: return "READ_ONLY";
+        case ESP_ZB_ZCL_STATUS_INSUFF_SPACE: return "INSUFF_SPACE";
+        case ESP_ZB_ZCL_STATUS_DUPE_EXISTS: return "DUPE_EXISTS";
+        case ESP_ZB_ZCL_STATUS_NOT_FOUND: return "NOT_FOUND";
+        case ESP_ZB_ZCL_STATUS_UNREPORTABLE_ATTRIB: return "UNREPORTABLE_ATTRIB";
+        case ESP_ZB_ZCL_STATUS_INVALID_TYPE: return "INVALID_TYPE";
+        case ESP_ZB_ZCL_STATUS_WRITE_ONLY: return "WRITE_ONLY";
+        case ESP_ZB_ZCL_STATUS_INCONSISTENT: return "INCONSISTENT";
+        case ESP_ZB_ZCL_STATUS_ACTION_DENIED: return "ACTION_DENIED";
+        case ESP_ZB_ZCL_STATUS_TIMEOUT: return "TIMEOUT";
+        case ESP_ZB_ZCL_STATUS_ABORT: return "ABORT";
+        case ESP_ZB_ZCL_STATUS_INVALID_IMAGE: return "INVALID_IMAGE";
+        case ESP_ZB_ZCL_STATUS_WAIT_FOR_DATA: return "WAIT_FOR_DATA";
+        case ESP_ZB_ZCL_STATUS_NO_IMAGE_AVAILABLE: return "NO_IMAGE_AVAILABLE";
+        case ESP_ZB_ZCL_STATUS_REQUIRE_MORE_IMAGE: return "REQUIRE_MORE_IMAGE";
+        case ESP_ZB_ZCL_STATUS_NOTIFICATION_PENDING: return "NOTIFICATION_PENDING";
+        case ESP_ZB_ZCL_STATUS_HW_FAIL: return "HW_FAIL";
+        case ESP_ZB_ZCL_STATUS_SW_FAIL: return "SW_FAIL";
+        case ESP_ZB_ZCL_STATUS_CALIB_ERR: return "CALIB_ERR";
+        case ESP_ZB_ZCL_STATUS_UNSUP_CLUST: return "UNSUP_CLUST";
+        case ESP_ZB_ZCL_STATUS_LIMIT_REACHED: return "LIMIT_REACHED";
+        default: return "UNKNOWN_STATUS";
+    }
+}
+
 /* ZCL attribute write callback for handling calibration updates */
 static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message)
 {
@@ -79,6 +119,17 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
                     ret = ESP_ERR_INVALID_ARG;
                 }
             }
+        }
+        break;
+    case ESP_ZB_CORE_CMD_DEFAULT_RESP_CB_ID:
+        {
+            const esp_zb_zcl_cmd_default_resp_message_t *default_resp = (esp_zb_zcl_cmd_default_resp_message_t*)message;
+            ESP_RETURN_ON_FALSE(default_resp, ESP_FAIL, TAG, "Empty default response message");
+            
+            const char *status_str = esp_zb_zcl_status_to_string(default_resp->status_code);
+            ESP_LOGI(TAG, "Default response received: endpoint(0x%x), cluster(0x%x), status_code(0x%x): %s",
+                     default_resp->info.dst_endpoint, default_resp->info.cluster, 
+                      default_resp->status_code, status_str);
         }
         break;
     default:
