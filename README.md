@@ -112,6 +112,32 @@ The firmware is configured for automatic reporting with the following settings:
 
 This ensures zigbee2mqtt will automatically receive updates when the ORP value changes significantly, without requiring manual polling.
 
+### Remote Calibration Control
+
+The firmware now supports remote calibration control through Zigbee2MQTT:
+
+- **Calibration Range**: ±500mV offset can be applied remotely
+- **Zigbee Attribute**: Custom attribute 0xF000 in Basic cluster
+- **Persistent Storage**: Calibration values are automatically saved to NVS
+- **Real-time Application**: Changes take effect immediately
+
+#### Using Calibration in Zigbee2MQTT
+
+1. The sensor exposes an `orp_calibration` control in the Zigbee2MQTT interface
+2. Set calibration offset between -500mV and +500mV
+3. Changes are applied immediately and persist across reboots
+4. Current calibration value is read from NVS on startup
+
+#### Calibration Workflow
+
+1. **Measure known standard**: Place ORP probe in a calibration solution with known ORP value
+2. **Read current sensor value**: Note the displayed ORP reading in Zigbee2MQTT
+3. **Calculate offset**: Offset = Known Value - Displayed Value
+4. **Apply calibration**: Set the calculated offset using the `orp_calibration` control
+5. **Verify**: Confirm the sensor now reads the correct value
+
+Example: If a 400mV standard solution reads as 380mV, set calibration to +20mV.
+
 ## Troubleshooting
 
 For any technical queries, please open an [issue](https://github.com/espressif/esp-zigbee-sdk/issues) on GitHub. We will get back to you soon.

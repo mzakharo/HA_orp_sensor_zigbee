@@ -21,6 +21,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "ha/esp_zigbee_ha_standard.h"
+#include <stdlib.h>  /* For abs() function */
 
 #if !defined ZB_ED_ROLE
 #error Define ZB_ED_ROLE in idf.py menuconfig to compile sensor (End Device) source code.
@@ -31,6 +32,60 @@ static const char *TAG = "ESP_ZB_ORP_SENSOR";
 static switch_func_pair_t button_func_pair[] = {
     {GPIO_INPUT_IO_TOGGLE_SWITCH, SWITCH_ONOFF_TOGGLE_CONTROL}
 };
+
+/* ZCL attribute write callback for handling calibration updates */
+static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message)
+{
+    esp_err_t ret = ESP_OK;
+    
+    switch (callback_id) {
+    case ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID:
+        {
+            const esp_zb_zcl_set_attr_value_message_t *set_attr_message = (esp_zb_zcl_set_attr_value_message_t*)message;
+            ESP_RETURN_ON_FALSE(set_attr_message, ESP_FAIL, TAG, "Empty message");
+            ESP_RETURN_ON_FALSE(set_attr_message->info.status == ESP_ZB_ZCL_STATUS_SUCCESS, ESP_ERR_INVALID_ARG, TAG, "Received message: error status(%d)",
+                                set_attr_message->info.status);
+
+            ESP_LOGI(TAG, "Received ZCL attribute write: endpoint(0x%x), cluster(0x%x), attribute(0x%x), data size(%d)",
+                     set_attr_message->info.dst_endpoint, set_attr_message->info.cluster, set_attr_message->attribute.id, set_attr_message->attribute.data.size);
+
+            /* Handle custom ORP calibration attribute */
+            if (set_attr_message->info.dst_endpoint == HA_ESP_SENSOR_ENDPOINT &&
+                set_attr_message->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_BASIC &&
+                set_attr_message->attribute.id == ESP_ZB_ZCL_ATTR_CUSTOM_ORP_CALIBRATION_ID) {
+                
+                if (set_attr_message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_S16) {
+                    int16_t calibration_offset = *(int16_t*)set_attr_message->attribute.data.value;
+                    
+                    /* Validate calibration range */
+                    if (calibration_offset >= ESP_ORP_CALIBRATION_MIN_VALUE && 
+                        calibration_offset <= ESP_ORP_CALIBRATION_MAX_VALUE) {
+                        
+                        /* Apply calibration to ORP sensor */
+                        ret = orp_sensor_set_calibration((int)calibration_offset);
+                        if (ret == ESP_OK) {
+                            ESP_LOGI(TAG, "ORP calibration set to: %d mV", calibration_offset);
+                        } else {
+                            ESP_LOGE(TAG, "Failed to set ORP calibration");
+                        }
+                    } else {
+                        ESP_LOGW(TAG, "Calibration value %d out of range [%d, %d]", 
+                                 calibration_offset, ESP_ORP_CALIBRATION_MIN_VALUE, ESP_ORP_CALIBRATION_MAX_VALUE);
+                        ret = ESP_ERR_INVALID_ARG;
+                    }
+                } else {
+                    ESP_LOGW(TAG, "Invalid data type for calibration attribute: %d", set_attr_message->attribute.data.type);
+                    ret = ESP_ERR_INVALID_ARG;
+                }
+            }
+        }
+        break;
+    default:
+        ESP_LOGW(TAG, "Receive Zigbee action(0x%x) callback", callback_id);
+        break;
+    }
+    return ret;
+}
 
 static void esp_app_buttons_handler(switch_func_pair_t *button_func_pair)
 {
@@ -50,27 +105,44 @@ static void esp_app_buttons_handler(switch_func_pair_t *button_func_pair)
     }
 }
 
+/* Static variable to track last reported value for change detection */
+static int last_reported_orp_mv = -1;
+static const int ORP_REPORT_THRESHOLD = 1; /* Report if change >= 1 */
+
 static void esp_app_orp_sensor_handler(int orp_mv)
 {
     float orp_value = (float)orp_mv;
+    bool should_report = false;
+    
+    /* Check if this is the first reading or if change is significant enough */
+    if (last_reported_orp_mv == -1 || abs(orp_mv - last_reported_orp_mv) >= ORP_REPORT_THRESHOLD) {
+        should_report = true;
+        last_reported_orp_mv = orp_mv;
+    }
+    
     /* Update ORP sensor measured value */
     esp_zb_lock_acquire(portMAX_DELAY);
     esp_zb_zcl_set_attribute_val(HA_ESP_SENSOR_ENDPOINT,
         ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
         ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID, &orp_value, false);
     
-    /* Send automatic report when value changes */
-    esp_zb_zcl_report_attr_cmd_t report_attr_cmd = {0};
-    report_attr_cmd.address_mode = ESP_ZB_APS_ADDR_MODE_DST_ADDR_ENDP_NOT_PRESENT;
-    report_attr_cmd.attributeID = ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID;
-    report_attr_cmd.direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_CLI;
-    report_attr_cmd.clusterID = ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT;
-    report_attr_cmd.zcl_basic_cmd.src_endpoint = HA_ESP_SENSOR_ENDPOINT;
-    esp_zb_zcl_report_attr_cmd_req(&report_attr_cmd);
-    
+    /* Send automatic report when value changes significantly */
+    if (should_report) {
+        esp_zb_zcl_report_attr_cmd_t report_attr_cmd = {0};
+        report_attr_cmd.address_mode = ESP_ZB_APS_ADDR_MODE_DST_ADDR_ENDP_NOT_PRESENT;
+        report_attr_cmd.attributeID = ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID;
+        report_attr_cmd.direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_CLI;
+        report_attr_cmd.clusterID = ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT;
+        report_attr_cmd.zcl_basic_cmd.src_endpoint = HA_ESP_SENSOR_ENDPOINT;
+        
+        esp_err_t ret = esp_zb_zcl_report_attr_cmd_req(&report_attr_cmd);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to send attribute report: %s", esp_err_to_name(ret));
+        }
+    }
     esp_zb_lock_release();
     
-    ESP_LOGI(TAG, "ORP sensor value updated and reported: %d mV", orp_mv);
+    ESP_LOGI(TAG, "ORP sensor value updated: %d mV%s", orp_mv, should_report ? " [REPORTED]" : "");
 }
 
 static void bdb_start_top_level_commissioning_cb(uint8_t mode_mask)
@@ -148,6 +220,13 @@ static esp_zb_cluster_list_t *custom_orp_sensor_clusters_create(esp_zb_analog_in
     esp_zb_attribute_list_t *basic_cluster = esp_zb_basic_cluster_create(NULL);
     ESP_ERROR_CHECK(esp_zb_basic_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, MANUFACTURER_NAME));
     ESP_ERROR_CHECK(esp_zb_basic_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, MODEL_IDENTIFIER));
+    
+    /* Add custom calibration attribute manually to basic cluster */
+    int16_t calibration_default = 0;  /* Default calibration offset */
+    ESP_ERROR_CHECK(esp_zb_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_CLUSTER_ID_BASIC, 
+        ESP_ZB_ZCL_ATTR_CUSTOM_ORP_CALIBRATION_ID, ESP_ZB_ZCL_ATTR_TYPE_S16, 
+        ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &calibration_default));
+    
     ESP_ERROR_CHECK(esp_zb_cluster_list_add_basic_cluster(cluster_list, basic_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
     ESP_ERROR_CHECK(esp_zb_cluster_list_add_identify_cluster(cluster_list, esp_zb_identify_cluster_create(NULL), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
     ESP_ERROR_CHECK(esp_zb_cluster_list_add_identify_cluster(cluster_list, esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_IDENTIFY), ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE));
@@ -184,26 +263,47 @@ static void esp_zb_task(void *pvParameters)
     /* Register the device */
     esp_zb_device_register(esp_zb_sensor_ep);
 
-    /* Config the reporting info  */
+    /* Register ZCL attribute write handler */
+    esp_zb_core_action_handler_register(zb_action_handler);
+
+    /* Initialize calibration attribute with current value from NVS */
+    int current_calibration = 0;
+    if (orp_sensor_get_calibration(&current_calibration) == ESP_OK) {
+        int16_t calibration_value = (int16_t)current_calibration;
+        esp_zb_zcl_set_attribute_val(HA_ESP_SENSOR_ENDPOINT,
+            ESP_ZB_ZCL_CLUSTER_ID_BASIC, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+            ESP_ZB_ZCL_ATTR_CUSTOM_ORP_CALIBRATION_ID, &calibration_value, false);
+        ESP_LOGI(TAG, "Initialized calibration attribute with current value: %d mV", current_calibration);
+    }
+
+    /* Config the reporting info for automatic reporting */
     esp_zb_zcl_reporting_info_t reporting_info = {
-        .direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_SRV,
+        .direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_CLI,
         .ep = HA_ESP_SENSOR_ENDPOINT,
         .cluster_id = ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT,
         .cluster_role = ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
         .dst.profile_id = ESP_ZB_AF_HA_PROFILE_ID,
-        .u.send_info.min_interval = 1,
-        .u.send_info.max_interval = 300,
+        .u.send_info.min_interval = 1,     /* Minimum 10 seconds between reports */
+        .u.send_info.max_interval = 10,    /* Maximum 10 minutes between reports */
         .u.send_info.def_min_interval = 1,
-        .u.send_info.def_max_interval = 300,
-        .u.send_info.delta.u16 = 10,
+        .u.send_info.def_max_interval = 10,
+        .u.send_info.delta.u16 = ORP_REPORT_THRESHOLD,        /* Report when change >= 10mV (matches our threshold) */
         .attr_id = ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID,
         .manuf_code = ESP_ZB_ZCL_ATTR_NON_MANUFACTURER_SPECIFIC,
     };
 
-    esp_zb_zcl_update_reporting_info(&reporting_info);
+    esp_err_t ret = esp_zb_zcl_update_reporting_info(&reporting_info);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to configure reporting info: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "Configured automatic reporting: min=%ds, max=%ds, delta=%dmV", 
+                 reporting_info.u.send_info.min_interval, 
+                 reporting_info.u.send_info.max_interval,
+                 reporting_info.u.send_info.delta.u16);
+    }
 
     esp_zb_set_primary_network_channel_set(ESP_ZB_PRIMARY_CHANNEL_MASK);
-    ESP_ERROR_CHECK(esp_zb_start(false));
+        ESP_ERROR_CHECK(esp_zb_start(false));
 
     esp_zb_stack_main_loop();
 }
