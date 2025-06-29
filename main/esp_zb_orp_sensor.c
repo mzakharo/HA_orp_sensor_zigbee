@@ -22,6 +22,13 @@
 #include "freertos/task.h"
 #include "ha/esp_zigbee_ha_standard.h"
 #include <stdlib.h>  /* For abs() function */
+#ifdef CONFIG_PM_ENABLE
+#include "esp_pm.h"
+#include "esp_private/esp_clk.h"
+#include "esp_sleep.h"
+#endif
+#include "driver/rtc_io.h"
+#include "driver/gpio.h"
 
 #if !defined ZB_ED_ROLE
 #error Define ZB_ED_ROLE in idf.py menuconfig to compile sensor (End Device) source code.
@@ -71,6 +78,23 @@ static const char* esp_zb_zcl_status_to_string(uint8_t status_code)
         case ESP_ZB_ZCL_STATUS_LIMIT_REACHED: return "LIMIT_REACHED";
         default: return "UNKNOWN_STATUS";
     }
+}
+
+static esp_err_t esp_zb_power_save_init(void)
+{
+    esp_err_t rc = ESP_OK;
+#ifdef CONFIG_PM_ENABLE
+    int cur_cpu_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
+    esp_pm_config_t pm_config = {
+        .max_freq_mhz = cur_cpu_freq_mhz,
+        .min_freq_mhz = cur_cpu_freq_mhz,
+#if CONFIG_FREERTOS_USE_TICKLESS_IDLE
+        .light_sleep_enable = true
+#endif
+    };
+    rc = esp_pm_configure(&pm_config);
+#endif
+    return rc;
 }
 
 /* ZCL attribute write callback for handling calibration updates */
@@ -157,20 +181,9 @@ static void esp_app_buttons_handler(switch_func_pair_t *button_func_pair)
     }
 }
 
-/* Static variable to track last reported value for change detection */
-static int last_reported_orp_mv = -1;
-static const int ORP_REPORT_THRESHOLD = 1; /* Report if change >= 1 */
-
 static void esp_app_orp_sensor_handler(int orp_mv)
 {
     float orp_value = (float)orp_mv;
-    bool should_report = false;
-    
-    /* Check if this is the first reading or if change is significant enough */
-    if (last_reported_orp_mv == -1 || abs(orp_mv - last_reported_orp_mv) >= ORP_REPORT_THRESHOLD) {
-        should_report = true;
-        last_reported_orp_mv = orp_mv;
-    }
     
     /* Update ORP sensor measured value */
     esp_zb_lock_acquire(portMAX_DELAY);
@@ -178,23 +191,21 @@ static void esp_app_orp_sensor_handler(int orp_mv)
         ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
         ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID, &orp_value, false);
     
-    /* Send automatic report when value changes significantly */
-    if (should_report) {
-        esp_zb_zcl_report_attr_cmd_t report_attr_cmd = {0};
-        report_attr_cmd.address_mode = ESP_ZB_APS_ADDR_MODE_DST_ADDR_ENDP_NOT_PRESENT;
-        report_attr_cmd.attributeID = ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID;
-        report_attr_cmd.direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_CLI;
-        report_attr_cmd.clusterID = ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT;
-        report_attr_cmd.zcl_basic_cmd.src_endpoint = HA_ESP_SENSOR_ENDPOINT;
-        
-        esp_err_t ret = esp_zb_zcl_report_attr_cmd_req(&report_attr_cmd);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to send attribute report: %s", esp_err_to_name(ret));
-        }
+    /* Always send report every 15 seconds */
+    esp_zb_zcl_report_attr_cmd_t report_attr_cmd = {0};
+    report_attr_cmd.address_mode = ESP_ZB_APS_ADDR_MODE_DST_ADDR_ENDP_NOT_PRESENT;
+    report_attr_cmd.attributeID = ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID;
+    report_attr_cmd.direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_CLI;
+    report_attr_cmd.clusterID = ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT;
+    report_attr_cmd.zcl_basic_cmd.src_endpoint = HA_ESP_SENSOR_ENDPOINT;
+    
+    esp_err_t ret = esp_zb_zcl_report_attr_cmd_req(&report_attr_cmd);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to send attribute report: %s", esp_err_to_name(ret));
     }
     esp_zb_lock_release();
     
-    ESP_LOGI(TAG, "ORP sensor value updated: %d mV%s", orp_mv, should_report ? " [REPORTED]" : "");
+    ESP_LOGI(TAG, "ORP sensor value: %d mV [REPORTED]", orp_mv);
 }
 
 static void bdb_start_top_level_commissioning_cb(uint8_t mode_mask)
@@ -259,6 +270,17 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             esp_zb_scheduler_alarm((esp_zb_callback_t)bdb_start_top_level_commissioning_cb, ESP_ZB_BDB_MODE_NETWORK_STEERING, 1000);
         }
         break;
+      case ESP_ZB_COMMON_SIGNAL_CAN_SLEEP:
+        {
+            esp_zb_zdo_signal_can_sleep_params_t *sleep_params = (esp_zb_zdo_signal_can_sleep_params_t *)esp_zb_app_signal_get_params(p_sg_p);
+            if (sleep_params) {
+                ESP_LOGI(TAG, "Zigbee can sleep for %lu ms", sleep_params->sleep_duration);
+            } else {
+                ESP_LOGI(TAG, "Zigbee can sleep");
+            }
+            esp_zb_sleep_now();
+        }
+        break;
     default:
         ESP_LOGI(TAG, "ZDO signal: %s (0x%x), status: %s", esp_zb_zdo_signal_to_string(sig_type), sig_type,
                  esp_err_to_name(err_status));
@@ -304,8 +326,10 @@ static esp_zb_ep_list_t *custom_orp_sensor_ep_create(uint8_t endpoint_id, esp_zb
 
 static void esp_zb_task(void *pvParameters)
 {
-    /* Initialize Zigbee stack */
+    /* initialize Zigbee stack with Zigbee end-device config */
     esp_zb_cfg_t zb_nwk_cfg = ESP_ZB_ZED_CONFIG();
+    /* Enable zigbee light sleep */
+    esp_zb_sleep_enable(true);
     esp_zb_init(&zb_nwk_cfg);
 
     /* Create customized ORP sensor endpoint */
@@ -338,11 +362,11 @@ static void esp_zb_task(void *pvParameters)
         .cluster_id = ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT,
         .cluster_role = ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
         .dst.profile_id = ESP_ZB_AF_HA_PROFILE_ID,
-        .u.send_info.min_interval = 1,     /* Minimum 10 seconds between reports */
-        .u.send_info.max_interval = 10,    /* Maximum 10 minutes between reports */
-        .u.send_info.def_min_interval = 1,
-        .u.send_info.def_max_interval = 10,
-        .u.send_info.delta.u16 = ORP_REPORT_THRESHOLD,        /* Report when change >= 10mV (matches our threshold) */
+        .u.send_info.min_interval = ESP_ORP_SENSOR_UPDATE_INTERVAL,     /* Minimum interval matches sensor update */
+        .u.send_info.max_interval = ESP_ORP_SENSOR_UPDATE_INTERVAL * 2, /* Maximum interval is 2x sensor update */
+        .u.send_info.def_min_interval = ESP_ORP_SENSOR_UPDATE_INTERVAL,
+        .u.send_info.def_max_interval = ESP_ORP_SENSOR_UPDATE_INTERVAL * 2,
+        .u.send_info.delta.u16 = 0,        /* Always report (no delta threshold) */
         .attr_id = ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID,
         .manuf_code = ESP_ZB_ZCL_ATTR_NON_MANUFACTURER_SPECIFIC,
     };
@@ -358,8 +382,7 @@ static void esp_zb_task(void *pvParameters)
     }
 
     esp_zb_set_primary_network_channel_set(ESP_ZB_PRIMARY_CHANNEL_MASK);
-        ESP_ERROR_CHECK(esp_zb_start(false));
-
+    ESP_ERROR_CHECK(esp_zb_start(false));
     esp_zb_stack_main_loop();
 }
 
@@ -370,8 +393,10 @@ void app_main(void)
         .host_config = ESP_ZB_DEFAULT_HOST_CONFIG(),
     };
     ESP_ERROR_CHECK(nvs_flash_init());
+    /* esp zigbee light sleep initialization*/
+    ESP_ERROR_CHECK(esp_zb_power_save_init());
+    /* load Zigbee platform config to initialization */
     ESP_ERROR_CHECK(esp_zb_platform_config(&config));
 
-    /* Start Zigbee stack task */
     xTaskCreate(esp_zb_task, "Zigbee_main", 4096, NULL, 5, NULL);
 }

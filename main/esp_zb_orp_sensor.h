@@ -14,16 +14,17 @@
 
 #include "esp_zigbee_core.h"
 
+#define ESP_ORP_SENSOR_UPDATE_INTERVAL  (15)    /* Local sensor update interval (15 seconds) */
+#define ESP_ORP_SENSOR_MIN_VALUE        (100)   /* Local sensor min measured value (millivolts) */
+#define ESP_ORP_SENSOR_MAX_VALUE        (4000)  /* Local sensor max measured value (millivolts) */
+
 /* Zigbee configuration */
 #define INSTALLCODE_POLICY_ENABLE       false   /* enable the install code policy for security */
 #define ED_AGING_TIMEOUT                ESP_ZB_ED_AGING_TIMEOUT_64MIN
-#define ED_KEEP_ALIVE                   3000    /* 3000 millisecond */
+#define ED_KEEP_ALIVE                   (ESP_ORP_SENSOR_UPDATE_INTERVAL * 1000)
 #define HA_ESP_SENSOR_ENDPOINT          10      /* esp ORP sensor device endpoint, used for ORP measurement */
 #define ESP_ZB_PRIMARY_CHANNEL_MASK     ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK    /* Zigbee primary channel mask use in the example */
 
-#define ESP_ORP_SENSOR_UPDATE_INTERVAL  (1)     /* Local sensor update interval (second) */
-#define ESP_ORP_SENSOR_MIN_VALUE        (100)   /* Local sensor min measured value (millivolts) */
-#define ESP_ORP_SENSOR_MAX_VALUE        (1000)  /* Local sensor max measured value (millivolts) */
 
 /* ORP calibration using maxPresentValue attribute in Analog Input cluster */
 #define ESP_ZB_ZCL_ATTR_ORP_CALIBRATION_ID    ESP_ZB_ZCL_ATTR_ANALOG_INPUT_MAX_PRESENT_VALUE_ID  /* Use maxPresentValue for calibration */

@@ -44,8 +44,8 @@ typedef void (*esp_orp_sensor_callback_t)(int orp_mv);
     .adc_unit = ADC_UNIT_1,                             \
     .adc_channel = ADC_CHANNEL_3,                       \
     .adc_atten = ADC_ATTEN_DB_12,                       \
-    .min_value_mv = 100,                                \
-    .max_value_mv = 1000,                               \
+    .min_value_mv = ESP_ORP_SENSOR_MIN_VALUE,                                \
+    .max_value_mv = ESP_ORP_SENSOR_MAX_VALUE,                               \
 }
 
 /**
